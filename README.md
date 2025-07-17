@@ -28,6 +28,82 @@ A persistent AI agent that automatically plays Kahoot quizzes using CrewAI Flows
 └─────────────────┘
 ```
 
+## Python Environment Setup
+
+Setting up a dedicated Python environment is highly recommended to avoid dependency conflicts. The recommended approach is to use **Miniconda** (lightweight Anaconda distribution). You may use Anaconda or `virtualenv` if preferred, but detailed steps below use Miniconda.
+
+### 1. Install Miniconda
+
+- Download the Miniconda installer for your OS: [Miniconda Download Page](https://docs.conda.io/en/latest/miniconda.html)
+- Follow the installation instructions for your platform.
+
+### 2. Create a New Environment (Python 3.12.3, conda-forge)
+
+Open a terminal (Anaconda Prompt, Command Prompt, or terminal of your choice) and run:
+
+```bash
+conda create -n kahoot-bot python=3.12.3 -c conda-forge
+```
+
+### 3. Activate the Environment
+
+```bash
+conda activate kahoot-bot
+```
+
+### 4. Verify Python Version
+
+```bash
+python --version
+```
+- Output should be `Python 3.12.3`
+
+> **Note:** You may use Anaconda or `virtualenv` if you prefer, but Miniconda is recommended for most users due to its lightweight footprint and ease of use.
+
+---
+
+### Alternative: Using Python Virtual Environment (`venv`)
+
+If you prefer not to use Miniconda, you can set up a dedicated Python environment using Python's built-in `venv` module. This approach is fully supported and works on all platforms.
+
+#### 1. Create a Virtual Environment
+
+Open a terminal in the project directory and run:
+
+```bash
+python -m venv venv
+```
+
+This will create a new directory named `venv` containing the isolated Python environment.
+
+#### 2. Activate the Virtual Environment
+
+- **On Windows:**
+  ```cmd
+  venv\Scripts\activate
+  ```
+- **On macOS/Linux:**
+  ```bash
+  source venv/bin/activate
+  ```
+
+#### 3. Verify Python Version
+
+```bash
+python --version
+```
+- Output should be `Python 3.12.3`
+
+#### 4. Install Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+> **Note:** You can use either Miniconda or Python's built-in `venv` to manage your environment. Both approaches are supported. Miniconda is recommended for most users, but `venv` is a lightweight alternative that works with any standard Python installation.
+
+---
+
 ## Quick Start
 
 ### 1. Install Dependencies
@@ -38,37 +114,70 @@ pip install -r requirements.txt
 
 ### 2. Setup Environment Variables
 
-Create a `.env` file:
+Create a `.env` file with the following:
 
 ```env
-# OpenRouter API Configuration
+# OPENROUTER_API_KEY is required for LLM (question answering) via OpenRouter
 OPENROUTER_API_KEY=your_openrouter_api_key_here
-OPENROUTER_MODEL=openai/gpt-4o-mini
 
-# Browser MCP Server Configuration  
-BROWSER_MCP_URL=ws://localhost:8080
-BROWSER_MCP_TRANSPORT=websocket
+# OPENAI_API_KEY is required for embeddings (document search); also used if you want to use OpenAI LLMs directly
+OPENAI_API_KEY=your_openai_api_key_here
 
-# Kahoot Game Configuration
+# Kahoot Game Configuration (optional, can be set at runtime)
 KAHOOT_PIN=435949
 KAHOOT_NICKNAME=CrewAI_Bot
 ```
+- `OPENROUTER_API_KEY` is required for LLM-powered question answering (via OpenRouter).
+- `OPENAI_API_KEY` is required for document embeddings (vector search) and is also used if you select an OpenAI LLM model.
 
-### 3. Start Browser MCP Server
+### 3. Node.js Requirement
 
-```bash
-# Install browser MCP server (if not already installed)
-npm install -g @browser-mcp/server
+- **Node.js v21.7.3 or later must be installed** (required for Browser MCP extension).
+- [Download Node.js](https://nodejs.org/) if not already installed.
 
-# Start the server
-browser-mcp-server --port 8080
-```
+> **Note:** You do **not** need to manually install or start the Browser MCP server.
+> The Python code will automatically launch the Browser MCP extension as needed.
+
 
 ### 4. Run the Kahoot Bot
 
-```bash
-python kahoot_bot.py
-```
+Follow this step-by-step flow to start the Kahoot bot:
+
+1. Run the bot:
+   ```bash
+   python kahoot_bot.py
+   ```
+2. When prompted, select the RAG collection to use for question answering.
+3. When prompted to "press Enter to continue," **switch to your browser** and:
+   - Open [kahoot.it](https://kahoot.it/) and enter the quiz PIN provided by the bot.
+   - Join the game with your chosen nickname.
+   - Connect the Browser MCP extension (follow the on-screen instructions if needed).
+4. **Only press Enter in the terminal when the quiz question is visible on your screen.**
+5. The bot will answer the question automatically, then wait for your input to continue to the next question.
+
+Repeat steps 4–5 for each question in the quiz.
+
+
+## Using `chromadb_manager.py`
+
+The `chromadb_manager.py` script provides an **interactive, menu-driven interface** for managing ChromaDB collections and documents.
+
+### Usage
+
+1. Run the script:
+   ```bash
+   python chromadb_manager.py
+   ```
+2. Follow the on-screen menu prompts to:
+   - List all collections
+   - Create or select a collection
+   - Add documents (with optional metadata)
+   - Query a collection
+   - View collection stats
+   - Delete a collection
+
+All actions are performed interactively—no CLI subcommands are required. Simply select the desired option from the menu and follow the prompts.
+
 
 ## How It Works
 
@@ -127,21 +236,8 @@ OPENROUTER_API_KEY=ollama
 OPENROUTER_BASE_URL=http://localhost:11434/v1
 ```
 
-### Custom Browser MCP Server
-
-```env
-# Different MCP server
-BROWSER_MCP_URL=http://localhost:3000/mcp
-BROWSER_MCP_TRANSPORT=http
-```
 
 ## Troubleshooting
-
-### Browser MCP Connection Issues
-
-1. Ensure Browser MCP server is running
-2. Check WebSocket/HTTP endpoint is accessible
-3. Verify MCP server has browser control permissions
 
 ### Game Join Failures
 

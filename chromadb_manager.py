@@ -1,8 +1,13 @@
-import chromadb
+"""
+chromadb_manager.py
+
+Docling + ChromaDB Knowledge Base Manager.
+
+Environment Variables:
+- OPENAI_API_KEY: API key for OpenAI embeddings (required for embedding functions)
+"""
+
 import os
-import sys
-from chromadb.utils import embedding_functions
-import sys
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from dotenv import load_dotenv
@@ -17,14 +22,13 @@ from docling.document_converter import PdfFormatOption
 import chromadb
 from chromadb.utils import embedding_functions
 
-import os
-
 load_dotenv()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") # Keep for embedding function as a fallback/example
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # Used for embedding function
 
 class DoclingChromaProcessor:
     """
-    A processor that uses Docling for document parsing and ChromaDB for storage
+    A processor that uses Docling for document parsing and ChromaDB for storage.
+    Handles document conversion, chunking, and embedding.
     """
     
     def __init__(self,
@@ -62,10 +66,17 @@ class DoclingChromaProcessor:
         return converter
     
     def _setup_embedding_function(self):
-        """Setup OpenAI embedding function"""
+        """
+        Setup OpenAI embedding function for ChromaDB.
+
+        Raises:
+            ValueError: If the OPENAI_API_KEY environment variable is not set.
+
+        Returns:
+            OpenAIEmbeddingFunction: The embedding function for ChromaDB.
+        """
         if not self.openai_api_key:
-            raise ValueError("OpenAI API key not found")
-        
+            raise ValueError("OPENAI_API_KEY environment variable is not set. Please set it in your environment or .env file.")
         return embedding_functions.OpenAIEmbeddingFunction(
             api_key=self.openai_api_key,
             model_name=self.embedding_model
@@ -73,19 +84,26 @@ class DoclingChromaProcessor:
 
     def extract_text_with_docling(self, file_path: str) -> Dict[str, Any]:
         """
-        Extract text and metadata using Docling
-        
+        Extract text and metadata from a document using Docling.
+
+        Args:
+            file_path (str): Path to the document file.
+
         Returns:
-            Dict containing text content, metadata, and structure info
+            dict: Contains 'content' (markdown), 'json_content', 'metadata', and 'document_object'.
+                  Returns None if extraction fails.
+
+        Error Handling:
+            Prints a clear, actionable error message if parsing fails.
         """
         try:
-            # Convert document
+            # Convert document using Docling
             result = self.converter.convert(file_path)
-            
+
             # Extract different formats
             markdown_content = result.document.export_to_markdown()
             json_content = result.document.export_to_json()
-            
+
             # Extract metadata
             metadata = {
                 "source": file_path,
@@ -96,16 +114,16 @@ class DoclingChromaProcessor:
                 "images_count": self._count_images(result.document),
                 "processing_time": getattr(result, 'processing_time', 0)
             }
-            
+
             return {
                 "content": markdown_content,
                 "json_content": json_content,
                 "metadata": metadata,
                 "document_object": result.document
             }
-            
+
         except Exception as e:
-            print(f"Docling parsing failed for {file_path}: {e}")
+            print(f"❌ Docling parsing failed for '{file_path}': {e}. Please check the file format and try again.")
             return None
     
     def _count_tables(self, document) -> int:
@@ -166,46 +184,51 @@ class DoclingChromaProcessor:
     def embed_document(self, collection_name: str, file_path: str,
                       chunk_size: int = 1000, overlap: int = 100) -> bool:
         """
-        Process document with Docling and store in ChromaDB
-        
+        Process a document with Docling and store it in ChromaDB.
+
         Args:
-            collection_name: Name of the ChromaDB collection
-            file_path: Path to the document
-            chunk_size: Size of each text chunk
-            overlap: Overlap between chunks
+            collection_name (str): Name of the ChromaDB collection.
+            file_path (str): Path to the document.
+            chunk_size (int): Size of each text chunk for embedding.
+            overlap (int): Overlap between chunks.
+
+        Returns:
+            bool: True if embedding was successful, False otherwise.
+
+        Error Handling:
+            Prints clear, actionable error messages for missing files, duplicate documents,
+            extraction failures, and ChromaDB errors.
         """
-        
         # Check if file exists
         if not os.path.isfile(file_path):
-            print(f"File not found: {file_path}")
+            print(f"❌ File not found: {file_path}. Please provide a valid file path.")
             return False
-        
+
         # Get or create collection
         collection = self.create_or_get_collection(collection_name)
-        
+
         # Check for existing document
         existing_docs = collection.get(where={"source": file_path})
         if existing_docs['ids']:
-            print(f"Document {file_path} already exists in collection")
+            print(f"ℹ️ Document '{file_path}' already exists in collection '{collection_name}'. Skipping embedding.")
             return False
-        
+
         # Extract content using Docling
         extracted_data = self.extract_text_with_docling(file_path)
         if not extracted_data:
-            print(f"Failed to extract content from {file_path}")
+            print(f"❌ Failed to extract content from '{file_path}'. Ensure the file is a supported format and try again.")
             return False
-        
+
         content = extracted_data['content']
         metadata = extracted_data['metadata']
-        
+
         # Chunk the content
         chunks = self.chunk_content(content, chunk_size, overlap)
-        
+
         # Prepare data for ChromaDB
         documents = chunks
         ids = [f"{Path(file_path).stem}_{i}" for i in range(len(chunks))]
         metadatas = []
-        
         for i, chunk in enumerate(chunks):
             chunk_metadata = metadata.copy()
             chunk_metadata.update({
@@ -214,7 +237,7 @@ class DoclingChromaProcessor:
                 "total_chunks": len(chunks)
             })
             metadatas.append(chunk_metadata)
-        
+
         # Add to collection
         try:
             collection.add(
@@ -222,11 +245,10 @@ class DoclingChromaProcessor:
                 ids=ids,
                 metadatas=metadatas
             )
-            print(f"Successfully embedded {len(chunks)} chunks from {file_path}")
+            print(f"✅ Successfully embedded {len(chunks)} chunks from '{file_path}' into collection '{collection_name}'.")
             return True
-            
         except Exception as e:
-            print(f"Failed to add document to collection: {e}")
+            print(f"❌ Failed to add document to collection '{collection_name}': {e}")
             return False
 
 class AdvancedDoclingProcessor(DoclingChromaProcessor):
