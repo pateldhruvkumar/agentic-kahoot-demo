@@ -13,6 +13,7 @@ from crewai.flow.flow import Flow, listen, start
 from crewai_tools import MCPServerAdapter
 from mcp import StdioServerParameters
 from dotenv import load_dotenv
+from rag_tool import RAGTool
 
 # Load environment variables
 load_dotenv()
@@ -65,7 +66,41 @@ class KahootBotFlow(Flow[KahootBotState]):
         """Keep bot alive and answer questions one by one with user confirmation"""
         print(f"🎮 Starting persistent quiz bot for {state.nickname}")
         print("📋 ASSUMPTION: You are already in the Kahoot waiting room")
-        
+
+        # Prompt user to select a collection at the start of the session
+        from chromadb import PersistentClient
+
+        chroma_client = PersistentClient(path="./chroma_db")
+        collections = chroma_client.list_collections()
+        if not collections:
+            print("❌ No collections found in ChromaDB. Please create one using chromadb_manager.py first.")
+            return state
+
+        print("📚 Available ChromaDB collections:")
+        for idx, col in enumerate(collections):
+            print(f"{idx+1}. {col.name}")
+
+        selected_collection_name = None
+        while selected_collection_name is None:
+            try:
+                choice = int(input("Select a collection by number for RAGTool: ")) - 1
+                if 0 <= choice < len(collections):
+                    selected_collection_name = collections[choice].name
+                    print(f"✅ Selected collection for RAGTool: {selected_collection_name}")
+                else:
+                    print("❌ Invalid selection. Try again.")
+            except ValueError:
+                print("❌ Invalid input. Please enter a number.")
+
+        try:
+            rag_tool = RAGTool(collection_name=selected_collection_name, db_path="./chroma_db/chroma.sqlite3")
+        except Exception as e:
+            print(f"❌ Failed to initialize RAGTool: {e}")
+            rag_tool = None
+        if not rag_tool:
+            print("❌ RAGTool initialization Failed.")
+            return state
+
         try:
             with MCPServerAdapter(self.browser_server_params) as browser_tools:
                 print("🚀 Browser MCP server started!")
@@ -100,12 +135,15 @@ class KahootBotFlow(Flow[KahootBotState]):
                 
                 # Simple answer instructions
                 answer_instructions = f"""
+                SYSTEM: For every quiz question, you MUST use the RAGTool to retrieve knowledge from the selected ChromaDB collection before answering, even if you think you know the answer. Do NOT answer from your own knowledge. Always call the RAGTool first, then use its output to select the answer.
+
                 1. Take a browser_snapshot to see the current page
                 2. If you see a quiz question with colored answer buttons:
                    - Read the question carefully
-                   - Click the most logical answer using browser_click
+                   - Use the RAGTool to search for the answer (ALWAYS do this first)
+                   - Click the most logical answer using browser_click, based on the RAGTool's output
                 3. If no question is visible, report what you see
-                
+
                 Be quick and decisive with your answer choice.
                 """
 
@@ -121,21 +159,26 @@ class KahootBotFlow(Flow[KahootBotState]):
                         print(f"🔍 Looking for question #{question_count}...")
                         
                         # Create fresh agent for each question (no memory persistence)
+                        # Add RAGTool to the list of tools if available
+                        tools_list = list(browser_tools)
+                        if rag_tool:
+                            tools_list.append(rag_tool)
+
                         quiz_agent = Agent(
-                            role="Kahoot Quiz Player", 
-                            goal="Look at the current browser page and click the best answer if there's a quiz question",
-                            backstory="I analyze quiz questions and click the most logical answer choice.",
+                            role="Kahoot Quiz Player",
+                            goal="For every quiz question, you MUST use the RAGTool to retrieve knowledge from the selected ChromaDB collection before answering. Do NOT answer from your own knowledge. Always call the RAGTool first, then use its output to select the answer.",
+                            backstory="I always use the RAGTool to search for the answer to every quiz question, even if I think I know it. I never answer from my own knowledge. I analyze quiz questions, use the RAGTool, and click the most logical answer choice based on its output.",
                             llm=self.llm,
-                            tools=browser_tools,
+                            tools=tools_list,
                             verbose=True,
                             memory=False,  # No memory to avoid cached browser state
                         )
                         
                         quiz_task = Task(
-                            description="Look at the browser page and click the best answer if there's a quiz question",
+                            description="Look at the browser page and click the best answer if there's a quiz question. If you need extra knowledge, use the RAGTool.",
                             expected_output="Answer clicked or report of current page state",
                             agent=quiz_agent,
-                            tools=browser_tools,
+                            tools=tools_list,
                             prompt=answer_instructions,
                         )
 
@@ -161,7 +204,7 @@ class KahootBotFlow(Flow[KahootBotState]):
                         retry = input("🔄 Press <Enter> to retry, or type 'quit' to stop: ").strip().lower()
                         if retry == 'quit':
                             break
-                
+
         except Exception as e:
             print(f"❌ Quiz monitoring failed: {e}")
             
@@ -178,4 +221,4 @@ def main():
     print(f"\n🎯 Final Result: {result}")
 
 if __name__ == "__main__":
-    main() 
+    main()
