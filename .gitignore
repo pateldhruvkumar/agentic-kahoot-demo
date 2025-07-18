@@ -25,3 +25,4 @@ Thumbs.db
 # Python virtual environments
 venv/
 .env/
+agent/
