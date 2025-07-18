@@ -4,6 +4,9 @@ from pydantic import BaseModel, Field
 from crewai.tools import BaseTool
 import os
 from chromadb.utils import embedding_functions
+from dotenv import load_dotenv
+
+load_dotenv()
 
 class RAGToolInput(BaseModel):
     query: str = Field(..., description="The query to search for relevant knowledge in the specified ChromaDB collection.")
@@ -22,34 +25,57 @@ class RAGTool(BaseTool):
     def __init__(self, collection_name: str, db_path: str = "chroma.sqlite3"):
         super().__init__()
         persist_dir = os.path.dirname(os.path.abspath(db_path)) or "."
+        api_key = os.getenv("OPENAI_API_KEY")
+        
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY environment variable is not set.")
 
         # Ensure client and embedding_function are attached to the instance using object.__setattr__
         # to avoid potential issues with BaseTool's __setattr__ or Pydantic interference.
         object.__setattr__(self, "_chroma_client", chromadb.PersistentClient(path=persist_dir))
-        object.__setattr__(self, "_embedding_function", embedding_functions.OpenAIEmbeddingFunction(
-            api_key=os.getenv("OPENAI_API_KEY"),
+        
+        # Use ChromaDB's built-in OpenAI embedding function
+        openai_ef = embedding_functions.OpenAIEmbeddingFunction(
+            api_key=api_key,
             model_name="text-embedding-ada-002"
-        ))
+        )
+        object.__setattr__(self, "_embedding_function", openai_ef)
 
         # Initialize collection_name and collection attribute
         object.__setattr__(self, "collection_name", collection_name)
-        object.__setattr__(self, "_collection", self._chroma_client.get_collection(
-            name=collection_name,
-            embedding_function=self._embedding_function
-        ))
+        try:
+            object.__setattr__(self, "_collection", self._chroma_client.get_collection(
+                name=collection_name,
+                embedding_function=self._embedding_function
+            ))
+        except Exception as e:
+            print(f"Warning: Could not get collection '{collection_name}': {e}")
+            object.__setattr__(self, "_collection", None)
 
     def _run(self, query: str, n_results: int = 3, collection_name: str = None) -> List[str]:
-        # Always use the pre-initialized collection, ignore any collection_name argument at runtime
+        """
+        Query the ChromaDB collection for relevant documents.
+        """
         collection_to_query = self._collection
 
         if not collection_to_query:
-            return ["Error: No collection selected for query. Please select a collection at the start of the session."]
+            return ["❌ Error: No collection selected for query. Please select a collection at the start of the session."]
 
-        results = collection_to_query.query(
-            query_texts=[query],
-            n_results=n_results,
-            include=['documents', 'metadatas'] # Ensure metadatas are included
-        )
+        try:
+            results = collection_to_query.query(
+                query_texts=[query],
+                n_results=n_results,
+                include=['documents', 'metadatas']  # Ensure metadatas are included
+            )
+        except Exception as e:
+            import traceback
+            error_type = type(e).__name__
+            tb = traceback.format_exc()
+            return [
+                f"❌ Error querying ChromaDB: {e}",
+                f"Exception type: {error_type}",
+                f"Traceback:\n{tb}"
+            ]
         docs_with_metadata = []
         if results.get("documents") and results["documents"][0]:
             for i in range(len(results["documents"][0])):
