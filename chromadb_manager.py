@@ -11,6 +11,8 @@ import os
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from dotenv import load_dotenv
+import sys
+import time
 
 # Docling imports
 from docling.document_converter import DocumentConverter
@@ -24,6 +26,54 @@ from chromadb.utils import embedding_functions
 
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # Used for embedding function
+
+class ProgressIndicator:
+    """Simple progress indicator for terminal"""
+    
+    def __init__(self, total_steps: int, task_name: str = "Processing"):
+        self.total_steps = total_steps
+        self.current_step = 0
+        self.task_name = task_name
+        self.start_time = time.time()
+    
+    def update(self, step: int = None, message: str = None):
+        """Update progress indicator"""
+        if step is not None:
+            self.current_step = step
+        else:
+            self.current_step += 1
+            
+        percentage = (self.current_step / self.total_steps) * 100
+        elapsed_time = time.time() - self.start_time
+        
+        # Create progress bar
+        bar_length = 30
+        filled_length = int(bar_length * self.current_step // self.total_steps)
+        bar = '█' * filled_length + '░' * (bar_length - filled_length)
+        
+        # Estimate remaining time
+        if self.current_step > 0:
+            estimated_total = elapsed_time * self.total_steps / self.current_step
+            remaining_time = estimated_total - elapsed_time
+            time_str = f" | ETA: {remaining_time:.0f}s"
+        else:
+            time_str = ""
+        
+        # Display message
+        display_msg = f" - {message}" if message else ""
+        
+        # Print progress (overwrite previous line)
+        sys.stdout.write(f"\r🔄 {self.task_name}: [{bar}] {percentage:.1f}% ({self.current_step}/{self.total_steps}){time_str}{display_msg}")
+        sys.stdout.flush()
+        
+        if self.current_step >= self.total_steps:
+            print(f"\n✅ {self.task_name} completed in {elapsed_time:.1f}s!")
+    
+    def finish(self, message: str = ""):
+        """Mark as finished"""
+        self.current_step = self.total_steps
+        elapsed_time = time.time() - self.start_time
+        print(f"\n✅ {self.task_name} completed in {elapsed_time:.1f}s! {message}")
 
 class DoclingChromaProcessor:
     """
@@ -53,8 +103,8 @@ class DoclingChromaProcessor:
         """Setup Docling converter with optimal settings"""
         # Configure PDF pipeline options for better performance
         pdf_options = PdfPipelineOptions()
-        pdf_options.do_ocr = True  # Enable OCR for scanned documents
-        pdf_options.do_table_structure = True  # Enable table structure recognition
+        pdf_options.do_ocr = False  # Disable OCR for large documents to save memory
+        pdf_options.do_table_structure = False  # Disable table structure for large documents
         
         # Create converter with options
         converter = DocumentConverter(
@@ -97,13 +147,20 @@ class DoclingChromaProcessor:
             Prints a clear, actionable error message if parsing fails.
         """
         try:
+            # Show extraction progress
+            print(f"📄 Starting text extraction for: {Path(file_path).name}")
+            extraction_progress = ProgressIndicator(3, "Text Extraction")
+            
+            extraction_progress.update(1, "Converting PDF with Docling")
             # Convert document using Docling
             result = self.converter.convert(file_path)
 
+            extraction_progress.update(2, "Exporting to markdown")
             # Extract different formats
             markdown_content = result.document.export_to_markdown()
             json_content = result.document.export_to_json()
 
+            extraction_progress.update(3, "Processing metadata")
             # Extract metadata
             metadata = {
                 "source": file_path,
@@ -115,6 +172,7 @@ class DoclingChromaProcessor:
                 "processing_time": getattr(result, 'processing_time', 0)
             }
 
+            extraction_progress.finish(f"Extracted {len(markdown_content):,} characters")
             return {
                 "content": markdown_content,
                 "json_content": json_content,
@@ -123,7 +181,7 @@ class DoclingChromaProcessor:
             }
 
         except Exception as e:
-            print(f"❌ Docling parsing failed for '{file_path}': {e}. Please check the file format and try again.")
+            print(f"\n❌ Docling parsing failed for '{file_path}': {e}. Please check the file format and try again.")
             return None
     
     def _count_tables(self, document) -> int:
@@ -251,6 +309,123 @@ class DoclingChromaProcessor:
             print(f"❌ Failed to add document to collection '{collection_name}': {e}")
             return False
 
+    def embed_large_pdf(self, collection_name: str, file_path: str) -> bool:
+        """
+        Specialized method for embedding large PDF files (200+ pages)
+        Uses memory-optimized processing and error recovery
+        """
+        import gc
+        import os
+        
+        # Check file size
+        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+        print(f"📋 File size: {file_size_mb:.1f} MB")
+        
+        if file_size_mb > 50:
+            print("⚠️  Large file detected. Using memory-optimized processing...")
+            
+        try:
+            # Force garbage collection before processing
+            gc.collect()
+            
+            # Use simplified Docling settings for large files
+            simple_options = PdfPipelineOptions()
+            simple_options.do_ocr = False
+            simple_options.do_table_structure = False
+            
+            simple_converter = DocumentConverter(
+                format_options={
+                    InputFormat.PDF: PdfFormatOption(pipeline_options=simple_options)
+                }
+            )
+            
+            print("🔄 Converting PDF to text (this may take several minutes)...")
+            conversion_progress = ProgressIndicator(2, "PDF Conversion")
+            
+            conversion_progress.update(1, "Processing with Docling")
+            result = simple_converter.convert(file_path)
+            
+            conversion_progress.update(2, "Extracting text content")
+            # Extract only markdown content (not JSON to save memory)
+            content = result.document.export_to_markdown()
+            conversion_progress.finish(f"Extracted {len(content):,} characters")
+            
+            # Small chunks for large documents
+            chunk_size = 300  # Very small chunks
+            overlap = 30
+            print(f"\n📚 Creating small chunks for large document...")
+            chunks = self.chunk_content(content, chunk_size=chunk_size, overlap=overlap)
+            print(f"📦 Created {len(chunks)} small chunks (size: {chunk_size})")
+            
+            # Get collection
+            collection = self.create_or_get_collection(collection_name)
+            
+            # Check for existing document
+            existing_docs = collection.get(where={"source": file_path})
+            if existing_docs['ids']:
+                print(f"ℹ️ Document already exists. Skipping.")
+                return False
+            
+            # Process in very small batches
+            batch_size = 20
+            total_batches = (len(chunks) + batch_size - 1) // batch_size
+            successful_batches = 0
+            
+            print(f"\n📤 Uploading {len(chunks)} chunks in {total_batches} small batches...")
+            upload_progress = ProgressIndicator(total_batches, "Large File Upload")
+            
+            for i in range(0, len(chunks), batch_size):
+                try:
+                    batch_num = i // batch_size + 1
+                    batch_chunks = chunks[i:i+batch_size]
+                    batch_ids = [f"{Path(file_path).stem}_chunk_{j}" for j in range(i, i+len(batch_chunks))]
+                    batch_metas = [{
+                        "source": file_path,
+                        "chunk_id": j,
+                        "chunk_size": len(chunk),
+                        "total_chunks": len(chunks)
+                    } for j, chunk in enumerate(batch_chunks, i)]
+                    
+                    upload_progress.update(batch_num, f"Batch {batch_num}/{total_batches} ({len(batch_chunks)} chunks)")
+                    
+                    collection.add(
+                        documents=batch_chunks,
+                        ids=batch_ids,
+                        metadatas=batch_metas
+                    )
+                    
+                    successful_batches += 1
+                    
+                    # Longer delay for large files
+                    time.sleep(1.0)
+                    
+                    # Force garbage collection every 10 batches
+                    if (i // batch_size) % 10 == 0:
+                        gc.collect()
+                        
+                except Exception as batch_error:
+                    print(f"\n❌ Batch {batch_num} failed: {batch_error}")
+                    continue
+            
+            upload_progress.finish(f"Processed {successful_batches}/{total_batches} batches successfully!")
+            print(f"📊 Total chunks embedded: {successful_batches * batch_size}")
+            return successful_batches > 0
+            
+        except MemoryError:
+            print("\n❌ Out of memory! Try:")
+            print("   1. Close other applications")
+            print("   2. Split PDF into smaller files")
+            print("   3. Use a machine with more RAM")
+            return False
+            
+        except Exception as e:
+            print(f"\n❌ Processing failed: {e}")
+            print("💡 Suggestions:")
+            print("   1. Check if PDF is corrupted")
+            print("   2. Try splitting into smaller files")
+            print("   3. Verify OpenAI API key and quota")
+            return False
+
 class AdvancedDoclingProcessor(DoclingChromaProcessor):
     """Advanced processor with additional features"""
     
@@ -271,16 +446,32 @@ class AdvancedDoclingProcessor(DoclingChromaProcessor):
         start_time = time.time()
         
         try:
+            print(f"🔍 Analyzing document structure for: {Path(file_path).name}")
+            structure_progress = ProgressIndicator(5, "Structure Analysis")
+            
+            structure_progress.update(1, "Converting document")
             result = self.converter.convert(file_path)
             processing_time = time.time() - start_time
             
+            structure_progress.update(2, "Extracting title")
+            title = self._extract_title(result.document)
+            
+            structure_progress.update(3, "Processing headers and sections")
+            headers = self._extract_headers(result.document)
+            
+            structure_progress.update(4, "Extracting tables and images")
+            tables = self._extract_tables(result.document)
+            images = self._extract_images(result.document)
+            references = self._extract_references(result.document)
+            
+            structure_progress.update(5, "Finalizing structured data")
             # Extract structured data
             structured_data = {
-                "title": self._extract_title(result.document),
-                "headers": self._extract_headers(result.document),
-                "tables": self._extract_tables(result.document),
-                "images": self._extract_images(result.document),
-                "references": self._extract_references(result.document),
+                "title": title,
+                "headers": headers,
+                "tables": tables,
+                "images": images,
+                "references": references,
                 "metadata": {
                     "source": file_path,
                     "processing_time": processing_time,
@@ -288,18 +479,20 @@ class AdvancedDoclingProcessor(DoclingChromaProcessor):
                 }
             }
             
+            # Add main content to structured_data for chunking
+            structured_data['content'] = result.document.export_to_markdown()
+            
+            structure_progress.finish(f"Found {len(headers)} headers, {len(tables)} tables, {len(images)} images")
+            
             # Update stats
             self.processing_stats["successful_extractions"] += 1
             self.processing_stats["total_processing_time"] += processing_time
-            
-            # Add main content to structured_data for chunking
-            structured_data['content'] = result.document.export_to_markdown()
 
             return structured_data
             
         except Exception as e:
             self.processing_stats["failed_extractions"] += 1
-            print(f"Error processing {file_path}: {e}")
+            print(f"\n❌ Error processing {Path(file_path).name}: {e}")
             return None
         
         finally:
@@ -386,16 +579,22 @@ class AdvancedDoclingProcessor(DoclingChromaProcessor):
         # Check for existing document
         existing_docs = collection.get(where={"source": file_path})
         if existing_docs['ids']:
-            print(f"Document {file_path} already exists in collection")
+            print(f"ℹ️ Document {Path(file_path).name} already exists in collection")
             return False
 
+        print(f"\n📚 Creating chunks for embedding...")
+        
         # Create different types of chunks
         chunks_data = []
         
-        # Main content chunks
+        # Main content chunks - REDUCED SIZE FOR LARGE DOCS
         main_content = structured_data.get('content', '')
         if main_content:
-            main_chunks = self.chunk_content(main_content)
+            # Use smaller chunks for large documents
+            chunk_size = 500 if len(main_content) > 100000 else 1000
+            main_chunks = self.chunk_content(main_content, chunk_size=chunk_size, overlap=50)
+            print(f"📄 Created {len(main_chunks)} main content chunks (size: {chunk_size})")
+            
             for i, chunk in enumerate(main_chunks):
                 chunks_data.append({
                     "content": chunk,
@@ -405,22 +604,28 @@ class AdvancedDoclingProcessor(DoclingChromaProcessor):
                 })
         
         # Table chunks
-        for i, table in enumerate(structured_data.get('tables', [])):
-            chunks_data.append({
-                "content": table['content'],
-                "type": "table",
-                "chunk_id": i,
-                "metadata": {**structured_data['metadata'], **table}
-            })
+        tables = structured_data.get('tables', [])
+        if tables:
+            print(f"📊 Adding {len(tables)} table chunks")
+            for i, table in enumerate(tables):
+                chunks_data.append({
+                    "content": table['content'],
+                    "type": "table",
+                    "chunk_id": i,
+                    "metadata": {**structured_data['metadata'], **table}
+                })
         
         # Header chunks
-        for i, header in enumerate(structured_data.get('headers', [])):
-            chunks_data.append({
-                "content": header['text'],
-                "type": "header",
-                "chunk_id": i,
-                "metadata": {**structured_data['metadata'], **header}
-            })
+        headers = structured_data.get('headers', [])
+        if headers:
+            print(f"📋 Adding {len(headers)} header chunks")
+            for i, header in enumerate(headers):
+                chunks_data.append({
+                    "content": header['text'],
+                    "type": "header",
+                    "chunk_id": i,
+                    "metadata": {**structured_data['metadata'], **header}
+                })
         
         # Prepare for ChromaDB
         documents = [item['content'] for item in chunks_data]
@@ -431,17 +636,39 @@ class AdvancedDoclingProcessor(DoclingChromaProcessor):
         for meta in metadatas:
             meta['source'] = file_path # Override with current file_path
 
+        # BATCH PROCESSING FOR LARGE DOCUMENTS
+        batch_size = 50  # Process in smaller batches
+        total_chunks = len(chunks_data)
+        total_batches = (total_chunks + batch_size - 1) // batch_size
+        
+        print(f"\n📤 Uploading {total_chunks} chunks in {total_batches} batches...")
+        upload_progress = ProgressIndicator(total_batches, "Embedding Upload")
+        
         try:
-            collection.add(
-                documents=documents,
-                ids=ids,
-                metadatas=metadatas
-            )
-            print(f"Successfully embedded {len(chunks_data)} structured chunks from {file_path}")
+            for i in range(0, total_chunks, batch_size):
+                batch_num = i // batch_size + 1
+                batch_end = min(i + batch_size, total_chunks)
+                batch_docs = documents[i:batch_end]
+                batch_ids = ids[i:batch_end]
+                batch_metas = metadatas[i:batch_end]
+                
+                upload_progress.update(batch_num, f"Batch {batch_num}/{total_batches} ({len(batch_docs)} chunks)")
+                
+                collection.add(
+                    documents=batch_docs,
+                    ids=batch_ids,
+                    metadatas=batch_metas
+                )
+                
+                # Add small delay to avoid rate limits
+                time.sleep(0.5)
+            
+            upload_progress.finish(f"Successfully embedded {len(chunks_data)} chunks!")
             return True
             
         except Exception as e:
-            print(f"Failed to embed structured document: {e}")
+            print(f"\n❌ Failed to embed structured document: {e}")
+            print(f"💡 Try reducing chunk size or splitting the PDF into smaller files")
             return False
 
     def query_collection(self, collection_name: str, query: str,
@@ -606,10 +833,33 @@ class InteractiveKnowledgeBase:
         
         file_path = input("Enter file path: ").strip()
         if os.path.isfile(file_path):
-            success = self.processor.embed_structured_document(
-                collection_name=self.current_collection,
-                file_path=file_path
-            )
+            # Check file size to suggest appropriate method
+            file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+            
+            if file_size_mb > 20:  # If larger than 20MB
+                print(f"📋 Large file detected ({file_size_mb:.1f} MB)")
+                print("Choose processing method:")
+                print("1. Standard processing (may fail for very large files)")
+                print("2. Large file processing (memory-optimized)")
+                
+                method = input("Select method (1 or 2): ").strip()
+                
+                if method == "2":
+                    success = self.processor.embed_large_pdf(
+                        collection_name=self.current_collection,
+                        file_path=file_path
+                    )
+                else:
+                    success = self.processor.embed_structured_document(
+                        collection_name=self.current_collection,
+                        file_path=file_path
+                    )
+            else:
+                success = self.processor.embed_structured_document(
+                    collection_name=self.current_collection,
+                    file_path=file_path
+                )
+                
             if success:
                 print("Document added successfully!")
             else:
