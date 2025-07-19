@@ -13,7 +13,6 @@ from typing import List, Optional, Dict, Any
 from dotenv import load_dotenv
 import sys
 import time
-import re # Added for sentence-based chunking
 
 # Docling imports
 from docling.document_converter import DocumentConverter
