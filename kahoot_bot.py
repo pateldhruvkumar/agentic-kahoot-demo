@@ -135,16 +135,48 @@ class KahootBotFlow(Flow[KahootBotState]):
                 
                 # Simple answer instructions
                 answer_instructions = f"""
-                SYSTEM: For every quiz question, you MUST use the RAGTool to retrieve knowledge from the selected ChromaDB collection before answering, even if you think you know the answer. Do NOT answer from your own knowledge. Always call the RAGTool first, then use its output to select the answer.
+                ENHANCED 4-STEP WORKFLOW FOR MAXIMUM ACCURACY:
 
-                1. Take a browser_snapshot to see the current page
-                2. If you see a quiz question with colored answer buttons:
-                   - Read the question carefully
-                   - Use the RAGTool to search for the answer (ALWAYS do this first)
-                   - Click the most logical answer using browser_click, based on the RAGTool's output
-                3. If no question is visible, report what you see
+                STEP 1: Take browser_snapshot to see the current page
+                
+                STEP 2: Extract BOTH from the browser snapshot:
+                - The EXACT question text word-for-word
+                - ALL available answer choices with their button references
+                  Example: "People and Possibilities in the Age of AI" [ref=s1e43]
+                
+                STEP 3: Use RAGTool with advanced analysis:
+                - Query: exact question text
+                - answer_choices: ["choice1", "choice2", "choice3", "choice4"] 
+                - The RAG tool will provide: "🎯 RECOMMENDED ANSWER: 'exact choice text'"
+                
+                STEP 4: Click the EXACT recommended answer:
+                - Find the button text that EXACTLY matches the RAG recommendation
+                - Use the button's ref ID to click it with browser_click
+                - Example: If RAG says "People and Possibilities in the Age of AI", 
+                  click button [ref=s1e43] that contains that exact text
+                - TASK COMPLETE after successful click
 
-                Be quick and decisive with your answer choice.
+                🎯 CRITICAL BUTTON MAPPING PROCESS:
+                1. RAG tool says: "🎯 RECOMMENDED ANSWER: 'it is related to changes in the brain structure.'"
+                2. In browser snapshot, find button containing: "it is related to changes in the brain structure."
+                3. Look for: button "it is related to changes in the brain structure." [ref=s1e53]
+                4. Execute: browser_click(element="button", ref="s1e53")
+
+                🚨 COMMON CLICKING MISTAKES TO AVOID:
+                - ❌ Don't click based on partial text matches
+                - ❌ Don't click the first button you see  
+                - ❌ Don't approximate or rephrase the RAG recommendation
+                - ✅ Find the button with text that EXACTLY matches RAG recommendation
+                - ✅ Use that button's specific ref ID
+                - ✅ Double-check text match before clicking
+
+                BUTTON MATCHING CHECKLIST:
+                □ I extracted the exact RAG recommendation text
+                □ I found the button containing that exact text
+                □ I identified the correct ref ID for that button
+                □ I'm about to click browser_click(element="button", ref="correct_ref")
+
+                If you cannot find an exact text match, report the issue rather than guessing.
                 """
 
                 # Continuous quiz loop
@@ -166,17 +198,19 @@ class KahootBotFlow(Flow[KahootBotState]):
 
                         quiz_agent = Agent(
                             role="Kahoot Quiz Player",
-                            goal="For every quiz question, you MUST use the RAGTool to retrieve knowledge from the selected ChromaDB collection before answering. Do NOT answer from your own knowledge. Always call the RAGTool first, then use its output to select the answer.",
-                            backstory="I always use the RAGTool to search for the answer to every quiz question, even if I think I know it. I never answer from my own knowledge. I analyze quiz questions, use the RAGTool, and click the most logical answer choice based on its output.",
+                            goal="Extract quiz question and answer choices with their button refs, use RAGTool for recommendation, then find and click the EXACT matching button by ref ID.",
+                            backstory="I am a precise quiz player who maps RAG recommendations to exact button text matches. When RAG recommends 'specific text', I find the button containing that EXACT text and click its ref ID. I never approximate or paraphrase - I match text exactly and click the corresponding button reference.",
                             llm=self.llm,
                             tools=tools_list,
                             verbose=True,
                             memory=False,  # No memory to avoid cached browser state
+                            max_iter=4,  # snapshot -> extract choices+refs -> RAG query -> find+click button
+                            allow_delegation=False,  # Prevent delegation issues
                         )
                         
                         quiz_task = Task(
-                            description="Look at the browser page and click the best answer if there's a quiz question. If you need extra knowledge, use the RAGTool.",
-                            expected_output="Answer clicked or report of current page state",
+                            description="1. Take browser snapshot 2. Extract question + answer choices with button refs 3. Use RAGTool for recommendation 4. Find exact matching button and click its ref",
+                            expected_output="Successfully clicked the button that exactly matches the RAG recommendation, or report if no question found",
                             agent=quiz_agent,
                             tools=tools_list,
                             prompt=answer_instructions,
