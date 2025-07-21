@@ -13,6 +13,7 @@ from typing import List, Optional, Dict, Any
 from dotenv import load_dotenv
 import sys
 import time
+import re # Added for sentence-based chunking
 
 # Docling imports
 from docling.document_converter import DocumentConverter
@@ -208,7 +209,7 @@ class DoclingChromaProcessor:
         print(f"Collection '{collection_name}' is ready (created or retrieved).")
         return collection
     
-    def chunk_content(self, content: str, chunk_size: int = 1000, overlap: int = 100) -> List[str]:
+    def chunk_content(self, content: str, chunk_size: int = 1000, overlap: int = 100, use_semantic: bool = True) -> List[str]:
         """
         Chunk content into smaller pieces for better retrieval
         
@@ -216,7 +217,110 @@ class DoclingChromaProcessor:
             content: Text content to chunk
             chunk_size: Size of each chunk
             overlap: Overlap between chunks
+            use_semantic: Whether to use semantic chunking (recommended for better accuracy)
         """
+        if use_semantic:
+            return self._semantic_chunking(content, chunk_size, overlap)
+        else:
+            return self._fixed_size_chunking(content, chunk_size, overlap)
+    
+    def _semantic_chunking(self, content: str, chunk_size: int = 1000, overlap: int = 100) -> List[str]:
+        """
+        Implement semantic chunking that preserves context better than fixed-size chunking
+        """
+        # Try to use spaCy for better sentence detection if available
+        try:
+            import spacy
+            nlp = spacy.load("en_core_web_sm")
+            return self._spacy_semantic_chunking(content, chunk_size, overlap, nlp)
+        except:
+            print("⚠️ spaCy not available, using sentence-based semantic chunking")
+            return self._sentence_based_chunking(content, chunk_size, overlap)
+    
+    def _spacy_semantic_chunking(self, content: str, chunk_size: int, overlap: int, nlp) -> List[str]:
+        """Semantic chunking using spaCy for better sentence and entity detection"""
+        doc = nlp(content)
+        chunks = []
+        current_chunk = ""
+        current_entities = set()
+        
+        for sent in doc.sents:
+            sent_text = sent.text.strip()
+            if not sent_text:
+                continue
+            
+            # Extract entities in this sentence
+            sent_entities = {ent.text.lower() for ent in sent.ents}
+            
+            # Check if adding this sentence would exceed chunk size
+            potential_chunk = current_chunk + " " + sent_text if current_chunk else sent_text
+            
+            if len(potential_chunk) > chunk_size and current_chunk:
+                # If there are shared entities, try to keep related sentences together
+                entity_overlap = current_entities.intersection(sent_entities)
+                
+                if entity_overlap and len(potential_chunk) < chunk_size * 1.2:
+                    # Allow slight size increase to keep related content together
+                    current_chunk = potential_chunk
+                    current_entities.update(sent_entities)
+                else:
+                    # Finalize current chunk and start new one
+                    chunks.append(current_chunk.strip())
+                    
+                    # Add overlap from previous chunk
+                    if overlap > 0 and chunks:
+                        overlap_text = self._extract_overlap(chunks[-1], overlap)
+                        current_chunk = overlap_text + " " + sent_text if overlap_text else sent_text
+                    else:
+                        current_chunk = sent_text
+                    
+                    current_entities = sent_entities
+            else:
+                current_chunk = potential_chunk
+                current_entities.update(sent_entities)
+        
+        # Add final chunk
+        if current_chunk.strip():
+            chunks.append(current_chunk.strip())
+        
+        return chunks
+    
+    def _sentence_based_chunking(self, content: str, chunk_size: int, overlap: int) -> List[str]:
+        """Fallback semantic chunking using sentence boundaries"""
+        # Split by sentences using multiple sentence endings
+        sentences = re.split(r'(?<=[.!?])\s+', content)
+        chunks = []
+        current_chunk = ""
+        
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            
+            # Check if adding this sentence would exceed chunk size
+            potential_chunk = current_chunk + " " + sentence if current_chunk else sentence
+            
+            if len(potential_chunk) > chunk_size and current_chunk:
+                # Finalize current chunk
+                chunks.append(current_chunk.strip())
+                
+                # Add overlap from previous chunk
+                if overlap > 0 and chunks:
+                    overlap_text = self._extract_overlap(chunks[-1], overlap)
+                    current_chunk = overlap_text + " " + sentence if overlap_text else sentence
+                else:
+                    current_chunk = sentence
+            else:
+                current_chunk = potential_chunk
+        
+        # Add final chunk
+        if current_chunk.strip():
+            chunks.append(current_chunk.strip())
+        
+        return chunks
+    
+    def _fixed_size_chunking(self, content: str, chunk_size: int, overlap: int) -> List[str]:
+        """Original fixed-size chunking method (kept for compatibility)"""
         chunks = []
         start = 0
         
@@ -239,16 +343,31 @@ class DoclingChromaProcessor:
         
         return chunks
     
+    def _extract_overlap(self, text: str, overlap_size: int) -> str:
+        """Extract overlap text from the end of a chunk"""
+        if len(text) <= overlap_size:
+            return text
+        
+        # Try to break at sentence boundary within overlap region
+        overlap_text = text[-overlap_size:]
+        sentence_start = overlap_text.find('. ')
+        
+        if sentence_start > 0:
+            return overlap_text[sentence_start + 2:]
+        else:
+            return overlap_text
+
     def embed_document(self, collection_name: str, file_path: str,
-                      chunk_size: int = 1000, overlap: int = 100) -> bool:
+                      chunk_size: int = 600, overlap: int = 50, use_semantic_chunking: bool = True) -> bool:
         """
         Process a document with Docling and store it in ChromaDB.
 
         Args:
             collection_name (str): Name of the ChromaDB collection.
             file_path (str): Path to the document.
-            chunk_size (int): Size of each text chunk for embedding.
-            overlap (int): Overlap between chunks.
+            chunk_size (int): Size of each text chunk for embedding (optimized for speed).
+            overlap (int): Overlap between chunks (reduced for speed).
+            use_semantic_chunking (bool): Use semantic chunking for better context preservation.
 
         Returns:
             bool: True if embedding was successful, False otherwise.
@@ -280,8 +399,10 @@ class DoclingChromaProcessor:
         content = extracted_data['content']
         metadata = extracted_data['metadata']
 
-        # Chunk the content
-        chunks = self.chunk_content(content, chunk_size, overlap)
+        # Use enhanced chunking for better accuracy
+        print(f"📚 Creating chunks using {'semantic' if use_semantic_chunking else 'fixed-size'} chunking...")
+        chunks = self.chunk_content(content, chunk_size, overlap, use_semantic=use_semantic_chunking)
+        print(f"✅ Created {len(chunks)} chunks (avg size: {sum(len(c) for c in chunks) // len(chunks)} chars)")
 
         # Prepare data for ChromaDB
         documents = chunks
@@ -292,7 +413,8 @@ class DoclingChromaProcessor:
             chunk_metadata.update({
                 "chunk_id": i,
                 "chunk_size": len(chunk),
-                "total_chunks": len(chunks)
+                "total_chunks": len(chunks),
+                "chunking_method": "semantic" if use_semantic_chunking else "fixed_size"
             })
             metadatas.append(chunk_metadata)
 
